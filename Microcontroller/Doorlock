@@ -1,0 +1,223 @@
+#include <SPI.h>
+#include <MFRC522.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+
+HTTPClient http;
+WiFiClient client;
+
+#define SS_PIN 21       // Pin SDA dihubungkan ke GPIO 21 (atau sesuai pengaturan Anda)
+#define RST_PIN 22      // Pin RST dihubungkan ke GPIO 22
+
+#define SS2_PIN 26       // Pin SDA dihubungkan ke GPIO 5 (atau sesuai pengaturan Anda)
+#define RST2_PIN 25      // Pin RST dihubungkan ke GPIO 4
+
+#define RELAY_PIN 27     // Pin untuk mengontrol relay
+
+MFRC522 rfid(SS_PIN, RST_PIN);  // Membuat instance MFRC522
+MFRC522 rfid2(SS2_PIN, RST2_PIN);
+
+const char *ssid = "***********";
+const char *password = "**********";
+
+const String url = "********************************";
+
+void wifiConnection() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi disconnected");
+
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+      Serial.print(".");
+      delay(1000);
+    }
+    Serial.println("\nWiFi Connected");
+  }
+}
+
+String rfid_reader(MFRC522 &rfid) {
+  // Cek apakah ada kartu yang terdeteksi
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
+    return "";
+  }
+
+  String uidString = "";
+  // Baca UID dari tag RFID
+  Serial.print("UID tag RFID: ");
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    uidString += (rfid.uid.uidByte[i] < 0x10) ? "0" : "";
+    uidString += String(rfid.uid.uidByte[i], HEX);
+  }
+
+  uidString.toUpperCase();
+  Serial.println(uidString);
+
+  // Hentikan komunikasi dengan tag RFID
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1(); // Ensure the reader is properly reset
+
+  return uidString;
+}
+
+bool check_uid(String uid) {
+  http.begin(url);
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+  int httpResponse = http.POST("uid=" + uid);
+
+  if (httpResponse == 200) {
+
+    String responseValue = http.getString();  //responseValue adalah string JSON yang diterima dari sumber data (seperti HTTP GET/POST).
+    http.end();
+
+    //Membuat sebuah objek JSON dokumen dengan ukuran buffer 200 byte.
+    //StaticJsonDocument adalah bagian dari library ArduinoJson untuk menyimpan struktur data JSON dalam memori yang dialokasikan secara statis (bukan dinamis).
+    //Keuntungan alokasi statis adalah kecepatan dan penghindaran fragmentasi memori.
+    StaticJsonDocument<200> doc;
+
+    DeserializationError error = deserializeJson(doc, responseValue);
+    //Fungsi deserializeJson() digunakan untuk mem-parsing (deserialize) string JSON dari payload dan menyimpannya ke dalam objek doc.
+    //DeserializationError adalah tipe data yang menunjukkan apakah parsing berhasil atau terjadi kesalahan.
+
+    String userStatus = doc["userStatus"];
+
+    if (!error) {
+      if (userStatus == "true") {
+        Serial.println("There's user");
+        return true;
+      } else {
+        Serial.println("There's no user with this UID");
+        return false;
+      }
+    } else {
+      Serial.println("Parsing Data Failed");
+      Serial.println(userStatus);
+      return false;
+    }
+
+  } else {
+    Serial.println("HTTP request failed");
+    http.end();
+    return false;
+  }
+}
+
+void tapReport(String status, String cardId) {
+  String tapStatus = url + "?tap=" + status + "&uid=" + cardId;
+
+  http.begin(tapStatus);
+  //  http.addHeader("Content-Type", "application/x-www-form-urlencoder");
+
+  int httpResponse = http.GET();
+  String responseValue = http.getString();
+
+  if (httpResponse == 200) {
+    Serial.println("Tap Report have uploaded: " + status);
+    Serial.println(responseValue);
+  }
+  else {
+    Serial.println("Tap Report fail to upload");
+    Serial.println(responseValue);
+  }
+  http.end();
+}
+
+bool check_out(String status, String cardId) {
+  String tapStatus = url + "?tap=" + status + "&uid=" + cardId;
+
+  http.begin(tapStatus);
+
+  int httpResponse = http.GET();
+
+  if (httpResponse == 200) {
+
+    String responseValue = http.getString();  //responseValue adalah string JSON yang diterima dari sumber data (seperti HTTP GET/POST).
+    http.end();
+
+    //Membuat sebuah objek JSON dokumen dengan ukuran buffer 200 byte.
+    //StaticJsonDocument adalah bagian dari library ArduinoJson untuk menyimpan struktur data JSON dalam memori yang dialokasikan secara statis (bukan dinamis).
+    //Keuntungan alokasi statis adalah kecepatan dan penghindaran fragmentasi memori.
+    StaticJsonDocument<200> doc;
+
+    DeserializationError error = deserializeJson(doc, responseValue);
+    //Fungsi deserializeJson() digunakan untuk mem-parsing (deserialize) string JSON dari payload dan menyimpannya ke dalam objek doc.
+    //DeserializationError adalah tipe data yang menunjukkan apakah parsing berhasil atau terjadi kesalahan.
+
+    String userStatus = doc["status"];
+
+    if (!error) {
+      if (userStatus == "accepted") {
+        Serial.println("There's user");
+        return true;
+      } else {
+        Serial.println("You cant come out");
+        return false;
+      }
+    } else {
+      Serial.println("Parsing Data Failed");
+      Serial.println(userStatus);
+    }
+  } else {
+    Serial.println("HTTP request failed");
+    http.end();
+    return false;
+  }
+}
+
+//================================================================================================================
+void setup() {
+  Serial.begin(115200);        // Inisialisasi serial
+
+  SPI.begin();                 // Inisialisasi SPI bus
+  rfid.PCD_Init();             // Inisialisasi RFID reader
+  rfid2.PCD_Init();
+
+  pinMode(RELAY_PIN, OUTPUT);  // Atur pin relay sebagai output
+  digitalWrite(RELAY_PIN, LOW); // Pastikan relay mati saat awal
+  Serial.println("Scan RFID tag");
+}
+
+void loop() {
+  //memastikan esp32 terhubung dengan wifi
+  wifiConnection();
+
+  //pembacaan kartu oleh rfid
+  String tapIn_id = rfid_reader(rfid);
+  String tapOut_id = rfid_reader(rfid2);
+
+  //pengecekkan apakah kartu sudah terdaftar
+  if (tapIn_id != "") {
+    if (check_uid(tapIn_id)) {
+      Serial.println("Access accepted, you can come IN");
+
+      //simpan status masuk
+      tapReport("masuk", tapIn_id);
+
+      digitalWrite(RELAY_PIN, HIGH);
+      delay(3000);
+      digitalWrite(RELAY_PIN, LOW);
+    }
+    else {
+      Serial.println("Access denied");
+    }
+    Serial.println();
+  }
+  
+  if (tapOut_id != "") {
+    if (check_out("keluar", tapOut_id)) {
+      Serial.println("Access accepted, you can come OUT");
+
+      digitalWrite(RELAY_PIN, HIGH);
+      delay(3000);
+      digitalWrite(RELAY_PIN, LOW);
+    }
+    else {
+      Serial.println("Access denied, Please call the staff");
+    }
+    Serial.println();
+  }
+
+  delay(1000);
+}
+//==========================================================================================================
